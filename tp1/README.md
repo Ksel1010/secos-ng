@@ -44,9 +44,22 @@ sgdt: store global descriptor table in destination operand
 entrees: destination operand 
 asm volatile ("sgdt %0"::"m"(aLocation):"memory") 
 
+la macro : #define get_gdtr(aLocation) 
 
 limite: 
 la structure utilisée est 
+typedef struct global_descriptor_table_register
+{
+   uint16_t            limit;           /* dt limit = size - 1 */
+   union                                /* base address */
+   {
+      offset_t         addr;
+      seg_desc_t       *desc;
+   };
+
+} __attribute__((packed)) gdt_reg_t;
+
+qui contient le champs limit
 
 **Q2\* :  Dans [`tp.c`](./tp.c), un exemple d'implémentation d'affichage du
   contenu de table de type GDT est fournie (fonction `print_gdt_content`).
