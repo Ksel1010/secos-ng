@@ -47,6 +47,25 @@ kernel mem [0x302010 - 0x303820]
 déterminer la taille de la section `.mbh`  et `.stack` et en déduire d'où
 provient la valeur de point d'entrée à `0x302010` au lieu de `0x300000`.**
 
+
+***Reponse : ***
+
+le point d'entree entry: se trouve dans la section entry avec un offset de 0 => on execute $nm tp0/kernel.elf  | grep entry 
+00303010 T entry 
+.mbh a une taille de 3 : 
+   fichier kernel/core/start.c:
+   volatile const uint32_t __mbh__ mbh[] = {
+   MBH_MAGIC,
+   MBH_FLAGS,
+   (uint32_t)-(MBH_MAGIC+MBH_FLAGS),
+};
+=> 3 elements de 4octets allignés sur 16 => 0x10
+
+.stack a une taille de 0x2000 (space) allignées sur 16 octets
+d'ou le 0x302010 au lieu de 0X300000 (+ 0x2000 + 0x10)
+
+
+
 Note : il est possible de s'aider également de la page wiki sur les options de [linkage](https://github.com/agantet/secos-ng/wiki/Tooling#options-de-linkage).
 
 
@@ -106,3 +125,6 @@ Le comportement observé semble-t-il cohérent ?
 **Q4 : Compléter la fonction `tp()` de [tp.c](./tp.c) pour essayer de lire ou
   écrire à une adresse en dehors de la mémoire physique disponible (128 MB).
   Que se passe-t-il ? Comment pourrait-on l'expliquer ?**
+***reponse: ***
+L'ecriture se fasse quand même à l'@ % 128MB
+On peut l'expliquer par le fait que l'@ se lit en faisant une operatin & logique entre l'@ donnée et 0x7FFFFFF 
