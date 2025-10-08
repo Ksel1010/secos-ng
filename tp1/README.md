@@ -39,6 +39,15 @@ point d'entrée du noyau.
   de base de la GDT en cours d'utilisation ainsi que sa "limite" (type utile :
   `gdt_reg_t`).**
 
+***Reponse: ***
+sgdt: store global descriptor table in destination operand  
+entrees: destination operand 
+asm volatile ("sgdt %0"::"m"(aLocation):"memory") 
+
+
+limite: 
+la structure utilisée est 
+
 **Q2\* :  Dans [`tp.c`](./tp.c), un exemple d'implémentation d'affichage du
   contenu de table de type GDT est fournie (fonction `print_gdt_content`).
   L'utiliser pour afficher le contenu de la GDT courante.**
