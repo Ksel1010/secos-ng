@@ -62,6 +62,10 @@ générées.
 **Q1\* : Dans tp.c, localiser l'IDT et afficher son adresse de chargement**
   (cf. fonction `get_idtr()` définie dans [`segmem.h`](../kernel/include/segmem.h)).
 
+***reponse***
+addres idt = 0x304d40
+limit idt = 2047
+
 ## Gestion furtive des breakpoints #BP
 
 L'idée à présent est de compléter le contenu de l'IDT actuelle, notamment pour
@@ -89,6 +93,26 @@ qu'elle puisse gérer l'exception #BP. Le but est de ne pas modifier
   Quelle est la dernière instruction de cette fonction ? Quel est son
   impact sur la pile ? Est-ce cohérent avec ce qui était sur la pile au
   moment de l'arrivée d'une interruption ?**
+***reponse***
+00000000 <bp_handler>:
+   0:   55                      push   %ebp
+   1:   89 e5                   mov    %esp,%ebp
+   3:   83 ec 08                sub    $0x8,%esp
+   6:   83 ec 0c                sub    $0xc,%esp
+   9:   68 00 00 00 00          push   $0x0
+   e:   e8 fc ff ff ff          call   f <bp_handler+0xf>
+  13:   83 c4 10                add    $0x10,%esp
+  16:   90                      nop
+  17:   c9                      leave
+  18:   c3                      ret
+
+ret: derniere op 
+#### doc intel : 
+When executing a near return, the processor pops the return instruction pointer (offset) from the top of the stack
+into the EIP register and begins program execution at the new instruction pointer. The CS register is unchanged.
+
+
+le ret va depiler le 0 que la fonction a push-> probleme
 
 ### Deuxième essai : via l'assembleur inline
 
@@ -101,17 +125,27 @@ de l'essai précédent.
   uint32_t val;
    asm volatile ("mov 4(%%ebp), %0":"=r"(val));
 ```
+***reponse***
+val = 0x303f8b
 
 **Quelle signification cette valeur a-t-elle ? S'aider à nouveau de `objdump -D`
 pour comparer cette valeur à une adresse de votre noyau.**
+***reponse***
+cette adresse correspond à l'@ de retour attendue => l'@ de ret est a ebp-4 et non pas ebp
 
 **Q8\* : Qu'est-ce qui n'est pas stocké par le CPU à l'arrivée d'une
   interruption et qu'il est impératif de sauvegarder avant tout traitement de
   l'interruption ? L'implémenter en assembleur inline dans  `bp_handler`.**
 
+  ***reponse***
+  les registres ne sont pas sauvegardés. Il va nous etre utile d'utiliser l'instruction pusha et popa afin de sauvegarder les registres
+
 **Q9\* : Par quelle instruction doit se terminer la routine pour que le noyau
   rende la main à la fonction tp() ? L'implémenter en assembleur inline dans
   `bp_handler`.**
+
+  ***reponse***
+  a fonction d'interruction doit se finir par l(instruciton iret)
 
 **Q10 : Tester que le retour du traitement de l'interruption s'est effectué
   correctement en affichant un message de debug dans la fonction `bp_trigger()` 
@@ -120,3 +154,4 @@ pour comparer cette valeur à une adresse de votre noyau.**
 **Q11 : Quelles conclusions peut-on tirer du développement en C d'un
   gestionnaire d'interruption ? Pourquoi l'assembleur semble-t-il plus
   approprié ?**
+  Le compilateur considere la fonction du hander comme n'importe quelle autre fonction d'ou cca sauvegarde les parametres etc comme un appel de fonction classique alors qu'elle a ete appelee par l'instruction int3
