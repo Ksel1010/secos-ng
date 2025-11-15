@@ -44,6 +44,8 @@ void userland() {
 
 **Q3\* : Pourquoi observe-t-on une #GP ? Corriger le problème de sorte qu'il
   soit autorisé d'appeler l'interruption "48" avec un RPL à 3.**
+***reponse***
+comme on execute du code ring 3 et que la fonction de gestionnaire d'interruption a un dpl de 0 => GE
 
 **Q4\* : Modifier la fonction `syscall_handler()` pour qu'elle affiche une
   chaîne de caractères dont l'adresse se trouve dans le registre "ESI". Nous
@@ -55,3 +57,7 @@ void userland() {
   `syscall_handler()` ? Essayez de pirater ce service, depuis `userland
   ()`, afin de lire de la mémoire du noyau. Modifier le code de
   `syscall_handler` pour corriger ce problème.**
+***reponse***
+Le probleme de sécurité est que le handler lit une adresse donné par l'utilisateur et imprime son contenu. Le probleme est qu'un pirate peut donner une adresse du noyau pour aller lire son contenu.
+
+=> solution verifier que l'@ donnée correspond bel et bien à une @ du ds ring 3
