@@ -15,16 +15,16 @@ Permettre un ordonnancement préemptif de 2 tâches (T1 et T2) en ring 3 :
  - Le code et les données des tâches seront inclus dans le noyau à la compilation, comme nous l'avons fait dans les TPs précédents pour la fonction `userland()`.
  - Chaque tâche sera représentée par une fonction (ex. `user1()`, `user2()`) exécutant une boucle infinie.
  - La pagination doit être activée:
-   + Le noyau est identity mappé
-   + Les tâches sont identity mappées
-   + Les tâches possèdent leurs propres PGD/PTB
-   + Les tâches ont une zone de mémoire partagée :
+   + Le noyau est identity mappé **P**
+   + Les tâches sont identity mappées **p**
+   + Les tâches possèdent leurs propres PGD/PTB **p**
+   + Les tâches ont une zone de mémoire partagée : **p**
      - De la taille d'une page (4KB)
      - À l'adresse physique de votre choix
      - À des adresses virtuelles différentes
    + Les tâches doivent avoir leur propre pile noyau (4KB)
-   + Les tâches doivent avoir leur propre pile utilisateur (4KB)
- - La tâche 1 écrit un compteur (uint32_t) dans la zone de mémoire partagée
+   + Les tâches doivent avoir leur propre pile utilisateur (4KB) **P**
+ - La tâche 1 écrit un compteur (uint32_t) dans la zone de mémoire partagée **p**
  - La tâche 2 affiche le compteur depuis la zone de mémoire partagée
  - L'affichage dans la tâche 2 s'effectuera à l'aide d'un appel système :
    + L'interface utilisateur :
