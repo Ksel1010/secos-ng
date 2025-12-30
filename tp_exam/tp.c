@@ -68,6 +68,9 @@ tss_t      TSS;
 #define c3_dsc(_d) gdt_flat_dsc(_d,3,SEG_DESC_CODE_XR)
 #define d3_dsc(_d) gdt_flat_dsc(_d,3,SEG_DESC_DATA_RW)
 
+void user1() __attribute__((section(".user1"))); //precise physical addresses for user 1 and 2 and sys_counter as it is called by user2
+void user2() __attribute__((section(".user2")));
+void sys_counter(uint32_t *counter) __attribute__((section(".user2")));
 
 void init_gdt() {
    gdt_reg_t gdtr;
@@ -96,234 +99,273 @@ void init_gdt() {
    set_tr(ts_sel);
 
 }
+int current=0;
 
-void init_pgd_with_ptb(pde32_t* pgd, pte32_t* ptb, pte32_t* virt, int level){
+static void launch_task(pde32_t *pgd, void (*user_fn)(void),
+                        unsigned int user_stack_top, unsigned int kstack_top) {
+    set_cr3(pgd);
+
+    /* config TSS */
+    TSS.s0.esp = kstack_top;
+    TSS.s0.ss  = d0_sel; 
+
+    // push user SS, ESP, EFLAGS, CS, EIP puis iret 
+	//current=1; // tell that we execute the function user1
+    asm volatile (
+        "cli\n\t"
+        "push %0\n\t"     
+        "push %1\n\t"     
+        "pushf\n\t"
+		"orl $0x200, (%%esp)\n\t" 
+        "push %2\n\t"
+        "push %3\n\t"
+        "movl $1, current\n\t"
+		"iret\n\t"
+        :
+        : "i"(d3_sel), "r"(user_stack_top), "i"(c3_sel), "r"(user_fn)
+        : "memory"
+    );
+}
+
+void init_pgd_with_ptb(pde32_t* pgd, pte32_t* ptb, pte32_t* virt, int user){
+	//initialize the pgd with the ptb 
 	int pgd_index = ((uint32_t)virt >> 22) & 0x3FF;
     pgd[pgd_index].addr = ((unsigned int)ptb >> 12) & 0xFFFFF;
     pgd[pgd_index].p = 1;
     pgd[pgd_index].rw = 1;
-    pgd[pgd_index].lvl = level ? 1 : 0;
+    pgd[pgd_index].lvl = user ? 1 : 0;
 }
 
+__attribute__((naked)) 
 void syscall_isr_80() {
    asm volatile (
-      "leave ; pusha        \n"
+      "pusha        \n"
       "mov %esp, %eax      \n"
       "call syscall_handler \n"
       "popa ; iret"
       );
 }
 
-typedef struct {
-    uint32_t* esp;
-    uint32_t cr3;
-} task_ctx_t;
 
-task_ctx_t task1_ctx, task2_ctx;
-task_ctx_t* current_task;
+typedef struct {
+    uint32_t esp;
+    uint32_t kstack_top;
+} task_t;
+
+task_t task1, task2; // to store the esp user for each function along with the kernal stack
+
 
 void sys_counter(uint32_t *counter){
-	debug("sys counter\n");
-    asm volatile("int $0x80" :: "a"(counter));
+	if((uint32_t)counter>=SHARED2_VIRT && (uint32_t)counter<(SHARED2_VIRT+0x1000)){
+    	asm volatile("int $0x80" :: "a"(counter));
+	}else{
+		//debug("Address given is out of the scope of this function\n");
+	}
 }
-
 void user1(){
 	unsigned int *shared_counter = (uint32_t *)SHARED1_VIRT;
 	unsigned int i = *shared_counter;
 	while(1){
 		i++;
 		*shared_counter = i;
-		debug("user1\n");
-		debug("%p = %d\n", shared_counter, i);
 	}
 }
 
 void user2(){
-	debug("user2\n");
 	uint32_t *shared_counter = (uint32_t *)SHARED2_VIRT;
     while (1){
         sys_counter(shared_counter);  
 	}
 }
 
-int init = 2;
-uint32_t* espa;
-uint32_t* eip;
 
-
-void syscall_isr_32() {	
-	asm volatile("pusha" : : : "memory");
-	asm volatile("mov %%esp, %0" : "=r"(espa)); //save actual esp
-	espa-=4;// car l'appel du syscal fait push ebp donc esp de la fonction d'avant est celui de syscall-4
-    asm volatile("call change_task");
+uint32_t next_esp, current_esp;
+void change_task(void) {
+	debug("cr3 = 0x%x\n", get_cr3());
+    if (current == 1) {
+        task1.esp = current_esp;
+        current = 2;
+        next_esp = task2.esp;
+        TSS.s0.esp = task2.kstack_top;
+        set_cr3(PGD2_PHY);
+    } else { 
+		if (current==2){
+			task2.esp = current_esp;
+        	current = 1;
+        	next_esp = task1.esp;
+        	TSS.s0.esp = task1.kstack_top;
+        	set_cr3(PGD1_PHY);
+		}
+		else{
+			next_esp = current_esp;
+		}
+    }
 }
-
-void change_task(){
-	
-	if (init){
-		 //push registers
-		init --;
-	}else{
-		current_task->esp = espa;
-	}
-
-    // Switch task
-    current_task = (current_task == &task1_ctx) ? &task2_ctx : &task1_ctx;
-    set_cr3(current_task->cr3);
-	
-	debug("cr3 = %x\n",get_cr3());
-    // update esp in the TSS
-    //TSS.s0.esp = (current_task == &task1_ctx) ? (STACK_KER1_PHY + 0x1000)
-      //                                        : (STACK_KER2_PHY + 0x1000);
-	if(init!=1){
-		
-	}
-    asm volatile("mov %0, %%esp" : : "r"(current_task->esp) : "memory");
-    // pass to user
-	//debug("pass\n");
-	outb(32, 32);
-	//debug("pop\n");
-	asm volatile("popa; iret" : : : "memory");
-
+__attribute__((naked))
+void syscall_isr_32() {
+	asm volatile(
+		"pusha\n\t"
+		"mov %esp, current_esp\n\t"
+		"call change_task\n\t"
+		"mov next_esp, %esp\n\t"
+		"popa \n\t"
+		"movb $0x20, %al\n\t"
+        "outb %al, $0x20\n\t"
+        "sti\n\t"
+		"iret");
 }
 
 
 void __regparm__(1) syscall_handler(int_ctx_t *ctx){
-	debug("syscall hndlr\n");
-	uint32_t* counter = (uint32_t*) ctx->gpr.eax.raw;
-	if((uint32_t)counter>=SHARED2_VIRT && (uint32_t)counter<(SHARED2_VIRT+0x1000)){
-		debug("[SysCall] counter %p= %d\n", counter, *counter);
-	}else{
-		debug("Address given is out of the scope of this function\n");
-	}
+	debug("[SysCall] counter %p = 0x%x\n", (int*)ctx->gpr.eax.raw, *((int*)SHARED2_VIRT));
 }
 
-void prepare_initial_stack(uint32_t *stack_base, void (*entry)(void), task_ctx_t *ctx, uint32_t cr3)
-{
-	// This function would simulate the state of the stack for the first time as if it was prepared by an interruption
-	uint32_t *sp = stack_base + 0x400; 
-	*(--sp) = d3_sel;                              /* SS */
-	*(--sp) = (uint32_t)( (uint8_t*)STACK_USER1_PHY  + 0x1000 ); /* ESP user (top) */
-	*(--sp) = 0x202;                              /* EFLAGS (IF=1) */
-	*(--sp) = c3_sel;                              /* CS */
-	*(--sp) = (uint32_t)entry;                          /* EIP */
-	debug("c3 sel = %x\n", c3_sel);
+void prepare_initial_stack(uint32_t *stack_base, void (*entry)(void), task_t *ctx) {
+	//simuler lz pile suite a un appel a la fonction 
+    uint32_t* sp = stack_base; 
+    *(--sp) = d3_sel;                    
+    *(--sp) = (uint32_t)(stack_base ); 
+    *(--sp) = 0x202;                      
+    *(--sp) = c3_sel;                     
+    *(--sp) = (uint32_t)entry;            
 
-	for (int i =0; i<8; i++){
-		*(--sp) = 0;
-	}
-    ctx->esp = sp;
-    ctx->cr3 = cr3;
+    // Initialiser les registres généraux 
+    for (int i = 0; i < 8; i++) *(--sp) = 0;
+
+    ctx->esp = (uint32_t)sp;
 }
+
+
 
 void tp() {
-	/*Pagination*/
-	//uint32_t cr3 = get_cr3(); // save register CR3 to store pgd
+    // Pagination
 
-	//init kernel pgd with ptb
-	init_pgd_with_ptb(KERNEL_PGD, KERNEL_PTB, KERNEL_PTB, 0);
-	// init pgd1 with ptb1
-	init_pgd_with_ptb(PGD1_PHY, PTB1_PHY, PTB1_PHY, 1);
-	//init pgd2 with ptb2
-	init_pgd_with_ptb(PGD2_PHY, PTB2_PHY, PTB2_PHY, 1);
+	//init pgd
+    init_pgd_with_ptb(KERNEL_PGD, KERNEL_PTB, (pte32_t*)0x0, 0);
+    init_pgd_with_ptb(PGD1_PHY, PTB1_PHY, (pte32_t*)0x0, 1);
+    init_pgd_with_ptb(PGD1_PHY, PTB1_PHY, (pte32_t*)0x400000, 1); 
+    init_pgd_with_ptb(PGD1_PHY, PTB1_PHY, (pte32_t*)0x800000, 1); 
+    init_pgd_with_ptb(PGD2_PHY, PTB2_PHY, (pte32_t*)0x0, 1);
+    init_pgd_with_ptb(PGD2_PHY, PTB2_PHY, (pte32_t*)0x400000, 1);
+    init_pgd_with_ptb(PGD2_PHY, PTB2_PHY, (pte32_t*)0x800000, 1);
 
-	init_pgd_with_ptb(PGD1_PHY, PTB1_PHY, (pte32_t*)SHARED_PHY, 1);
-	
-	//set pgd kernel 
-	set_cr3(KERNEL_PGD);
+    // Pagination 
+    for (int addr = 0x600000; addr <= 0x621000; addr += 0x1000) {
+        int idx = (addr>>12)&0x3FF;
+        KERNEL_PTB[idx].addr = addr>>12; KERNEL_PTB[idx].p = 1; KERNEL_PTB[idx].rw = 1; KERNEL_PTB[idx].lvl = 0;
+        PTB1_PHY[idx].addr = addr>>12; PTB1_PHY[idx].p = 1; PTB1_PHY[idx].rw = 1; PTB1_PHY[idx].lvl = 0;
+        PTB2_PHY[idx].addr = addr>>12; PTB2_PHY[idx].p = 1; PTB2_PHY[idx].rw = 1; PTB2_PHY[idx].lvl = 0;
+    }
 
+    // map kernel and low memory
+    for (int addr = 0x0; addr < 0x100000; addr += 0x1000){
+        int idx = (addr>>12)&0x3FF;
+        PTB1_PHY[idx].addr = addr>>12; PTB1_PHY[idx].p = 1; PTB1_PHY[idx].rw = 1; PTB1_PHY[idx].lvl = 0;
+        PTB2_PHY[idx].addr = addr>>12; PTB2_PHY[idx].p = 1; PTB2_PHY[idx].rw = 1; PTB2_PHY[idx].lvl = 0;
+        KERNEL_PTB[idx].addr = addr>>12; KERNEL_PTB[idx].p = 1; KERNEL_PTB[idx].rw = 1; KERNEL_PTB[idx].lvl = 0;
+    }
+    for (int addr = 0x300000; addr < 0x30A000; addr += 0x1000){
+        int idx = (addr>>12)&0x3FF;
+        PTB1_PHY[idx].addr = addr>>12; PTB1_PHY[idx].p = 1; PTB1_PHY[idx].rw = 1; PTB1_PHY[idx].lvl = 0;
+        PTB2_PHY[idx].addr = addr>>12; PTB2_PHY[idx].p = 1; PTB2_PHY[idx].rw = 1; PTB2_PHY[idx].lvl = 0;
+        KERNEL_PTB[idx].addr = addr>>12; KERNEL_PTB[idx].p = 1; KERNEL_PTB[idx].rw = 1; KERNEL_PTB[idx].lvl = 0;
+    }
 
-	// identity mapping kernal region in every PTB : adresses got from program headers
-	for (int addr = 0x300000; addr < 0x306000; addr += 0x1000){
-		PTB1_PHY[(addr>>12)&0x3FF].addr = addr>>12;
-		PTB1_PHY[(addr>>12)&0x3FF].p = 1;
-		PTB1_PHY[(addr>>12)&0x3FF].rw = 1;
-		PTB1_PHY[(addr>>12)&0x3FF].lvl = 0;
+    /* map the code for each function*/
+	// user1
+    PTB1_PHY[(0x810000>>12)&0x3FF].addr = 0x810000>>12; PTB1_PHY[(0x810000>>12)&0x3FF].p = 1;
+    PTB1_PHY[(0x810000>>12)&0x3FF].rw = 1; PTB1_PHY[(0x810000>>12)&0x3FF].lvl = 1;
+    
+	//user2
+    PTB2_PHY[(0x820000>>12)&0x3FF].addr = 0x820000>>12; PTB2_PHY[(0x820000>>12)&0x3FF].p = 1;
+    PTB2_PHY[(0x820000>>12)&0x3FF].rw = 1; PTB2_PHY[(0x820000>>12)&0x3FF].lvl = 1;
 
-		PTB2_PHY[(addr>>12)&0x3FF].addr = addr>>12;
-		PTB2_PHY[(addr>>12)&0x3FF].p = 1;
-		PTB2_PHY[(addr>>12)&0x3FF].rw = 1;
-		PTB2_PHY[(addr>>12)&0x3FF].lvl = 0;
+    // map the stacks
+   
+    // kernel stacks  mapped everywhere
+    PTB1_PHY[(STACK_KER1_PHY>>12)&0x3FF].addr = STACK_KER1_PHY>>12;
+    PTB1_PHY[(STACK_KER1_PHY>>12)&0x3FF].p = 1;
+    PTB1_PHY[(STACK_KER1_PHY>>12)&0x3FF].rw = 1;
+    PTB1_PHY[(STACK_KER1_PHY>>12)&0x3FF].lvl = 0;
+    
+    PTB2_PHY[(STACK_KER1_PHY>>12)&0x3FF].addr = STACK_KER1_PHY>>12;
+    PTB2_PHY[(STACK_KER1_PHY>>12)&0x3FF].p = 1;
+    PTB2_PHY[(STACK_KER1_PHY>>12)&0x3FF].rw = 1;
+    PTB2_PHY[(STACK_KER1_PHY>>12)&0x3FF].lvl = 0;
+    
+    KERNEL_PTB[(STACK_KER1_PHY>>12)&0x3FF].addr = STACK_KER1_PHY>>12;
+    KERNEL_PTB[(STACK_KER1_PHY>>12)&0x3FF].p = 1;
+    KERNEL_PTB[(STACK_KER1_PHY>>12)&0x3FF].rw = 1;
+    KERNEL_PTB[(STACK_KER1_PHY>>12)&0x3FF].lvl = 0;
+    
+    PTB1_PHY[(STACK_KER2_PHY>>12)&0x3FF].addr = STACK_KER2_PHY>>12;
+    PTB1_PHY[(STACK_KER2_PHY>>12)&0x3FF].p = 1;
+    PTB1_PHY[(STACK_KER2_PHY>>12)&0x3FF].rw = 1;
+    PTB1_PHY[(STACK_KER2_PHY>>12)&0x3FF].lvl = 0;
+    
+    PTB2_PHY[(STACK_KER2_PHY>>12)&0x3FF].addr = STACK_KER2_PHY>>12;
+    PTB2_PHY[(STACK_KER2_PHY>>12)&0x3FF].p = 1;
+    PTB2_PHY[(STACK_KER2_PHY>>12)&0x3FF].rw = 1;
+    PTB2_PHY[(STACK_KER2_PHY>>12)&0x3FF].lvl = 0;
+    
+    KERNEL_PTB[(STACK_KER2_PHY>>12)&0x3FF].addr = STACK_KER2_PHY>>12;
+    KERNEL_PTB[(STACK_KER2_PHY>>12)&0x3FF].p = 1;
+    KERNEL_PTB[(STACK_KER2_PHY>>12)&0x3FF].rw = 1;
+    KERNEL_PTB[(STACK_KER2_PHY>>12)&0x3FF].lvl = 0;
+    
+    // stacks for each user function only mapped to their ptb
+    PTB1_PHY[(STACK_USER1_PHY>>12)&0x3FF].addr = STACK_USER1_PHY>>12;
+    PTB1_PHY[(STACK_USER1_PHY>>12)&0x3FF].p = 1;
+    PTB1_PHY[(STACK_USER1_PHY>>12)&0x3FF].rw = 1;
+    PTB1_PHY[(STACK_USER1_PHY>>12)&0x3FF].lvl = 1;
+    
+    PTB2_PHY[(STACK_USER2_PHY>>12)&0x3FF].addr = STACK_USER2_PHY>>12;
+    PTB2_PHY[(STACK_USER2_PHY>>12)&0x3FF].p = 1;
+    PTB2_PHY[(STACK_USER2_PHY>>12)&0x3FF].rw = 1;
+    PTB2_PHY[(STACK_USER2_PHY>>12)&0x3FF].lvl = 1;
 
-		KERNEL_PTB[(addr>>12)&0x3FF].addr = addr>>12;
-		KERNEL_PTB[(addr>>12)&0x3FF].p = 1;
-		KERNEL_PTB[(addr>>12)&0x3FF].rw = 1;
-		KERNEL_PTB[(addr>>12)&0x3FF].lvl = 0;
-	}
+    // map the shared memory
+    PTB1_PHY[(SHARED1_VIRT>>12)&0x3FF].addr = SHARED_PHY>>12; PTB1_PHY[(SHARED1_VIRT>>12)&0x3FF].p = 1;
+    PTB1_PHY[(SHARED1_VIRT>>12)&0x3FF].rw = 1; PTB1_PHY[(SHARED1_VIRT>>12)&0x3FF].lvl = 1;
+    
+    PTB2_PHY[(SHARED2_VIRT>>12)&0x3FF].addr = SHARED_PHY>>12; PTB2_PHY[(SHARED2_VIRT>>12)&0x3FF].p = 1;
+    PTB2_PHY[(SHARED2_VIRT>>12)&0x3FF].rw = 1; PTB2_PHY[(SHARED2_VIRT>>12)&0x3FF].lvl = 1;
 
-	//Identity mapping of tasks 1 and 2
-	PTB1_PHY[((unsigned int)(&user1)>>12)&0x3FF].addr = (unsigned int)(&user1)>>12;
-	PTB1_PHY[((unsigned int)(&user1)>>12)&0x3FF].p = 1;
-	PTB1_PHY[((unsigned int)(&user1)>>12)&0x3FF].rw = 1;
-	PTB1_PHY[((unsigned int)(&user1)>>12)&0x3FF].lvl = 1;
+    // init shared memory to 0
+    for(int i = 0; i < 4096; i++) *((char*)(SHARED_PHY + i)) = 0;
 
-	PTB2_PHY[((unsigned int)(&user2)>>12)&0x3FF].addr = (unsigned int)(&user2)>>12;
-	PTB2_PHY[((unsigned int)(&user2)>>12)&0x3FF].p = 1;
-	PTB2_PHY[((unsigned int)(&user2)>>12)&0x3FF].rw = 1;
-	PTB2_PHY[((unsigned int)(&user2)>>12)&0x3FF].lvl = 1;
+    debug("Initialisation GDT\n");
+    init_gdt();
 
-	// Mapping user stacks : identity mapping
-	PTB1_PHY[(STACK_USER1_PHY>>12)&0x3FF].addr = STACK_USER1_PHY>>12;
-	PTB1_PHY[(STACK_USER1_PHY>>12)&0x3FF].p = 1;
-	PTB1_PHY[(STACK_USER1_PHY>>12)&0x3FF].rw = 1;
-	PTB1_PHY[(STACK_USER1_PHY>>12)&0x3FF].lvl = 1;
+    idt_reg_t idt;
+    get_idtr(idt);
+    
+    int_desc_t* desc_80 = &idt.desc[0x80];
+    desc_80->offset_1 = ((unsigned int)(syscall_isr_80)) & 0xFFFF;
+    desc_80->offset_2 = ((unsigned int)(syscall_isr_80)) >> 16;
+    desc_80->selector = c0_sel; desc_80->type = 0xE; desc_80->dpl = 3; desc_80->p = 1;
 
-	PTB2_PHY[(STACK_USER2_PHY>>12)&0x3FF].addr = STACK_USER2_PHY>>12;
-	PTB2_PHY[(STACK_USER2_PHY>>12)&0x3FF].p = 1;
-	PTB2_PHY[(STACK_USER2_PHY>>12)&0x3FF].rw = 1;
-	PTB2_PHY[(STACK_USER2_PHY>>12)&0x3FF].lvl = 1;
+    int_desc_t* desc_32 = &idt.desc[32];
+    desc_32->offset_1 = ((unsigned int)(syscall_isr_32)) & 0xFFFF;
+    desc_32->offset_2 = ((unsigned int)(syscall_isr_32)) >> 16;
+    desc_32->selector = c0_sel; desc_32->type = 0xE; desc_32->dpl = 0; desc_32->p = 1;
+	debug("Initialisation IDT\n");
+    set_idtr(idt);
 
-	// Mapping shared page with different virtual addr
-	PTB1_PHY[(SHARED1_VIRT>>12)&0x3FF].addr = SHARED_PHY>>12;
-	PTB1_PHY[(SHARED1_VIRT>>12)&0x3FF].p = 1;
-	PTB1_PHY[(SHARED1_VIRT>>12)&0x3FF].rw = 1;
-	PTB1_PHY[(SHARED1_VIRT>>12)&0x3FF].lvl = 1;
+    task1.kstack_top = STACK_KER1_PHY + PAGE_SIZE;
+    task2.kstack_top = STACK_KER2_PHY + PAGE_SIZE;
+	//prepare the stack user2 to simulate an already called function as we cant call bth user1 and2 in C
+    prepare_initial_stack((uint32_t*)(STACK_USER2_PHY + PAGE_SIZE), (void(*)(void))0x820000, &task2);
 
-	PTB2_PHY[(SHARED2_VIRT>>12)&0x3FF].addr = SHARED_PHY>>12;
-	PTB2_PHY[(SHARED2_VIRT>>12)&0x3FF].p = 1;
-	PTB2_PHY[(SHARED2_VIRT>>12)&0x3FF].rw = 1;
-	PTB2_PHY[(SHARED2_VIRT>>12)&0x3FF].lvl = 1;
-	debug("before gdt\n");
-	// Initialize the global descriptor table 
-	init_gdt();
-	debug("after gdt\n");
-	/* Interruption initialization */
+    // enable pagination
+    set_cr3(KERNEL_PGD);
+    debug("PAGINATION...\n");
+    set_cr0(get_cr0() | (1UL << 31));
+    debug("Pagination activated\n");
 
-	// interruption 80
-	idt_reg_t idt;
-	get_idtr(idt);
-	int_desc_t* desc_80 = &idt.desc[0x80];
-	desc_80->offset_1 = ((unsigned int) (syscall_isr_80)) & 0x0000FFFF;
-	desc_80->offset_2 = (((unsigned int) (syscall_isr_80))&0xFFFF0000 ) >>16;
-	desc_80->dpl = 3;
+    debug("Launch user1()\n");
+    launch_task((pde32_t*)PGD1_PHY, (void(*)(void))0x810000, 
+                STACK_USER1_PHY + PAGE_SIZE, STACK_KER1_PHY + PAGE_SIZE);
 
-	//interruption 32
-	int_desc_t* desc_32 = &idt.desc[32];
-	desc_32->offset_1 = ((unsigned int) (syscall_isr_32)) & 0x0000FFFF;
-	desc_32->offset_2 = (((unsigned int) (syscall_isr_32))&0xFFFF0000 ) >>16;
-	desc_32->dpl = 0;
-
-	//Initialize the shared memory to 0
-	for(int i = 0; i<1024; i++){
-		*((char*)(SHARED_PHY+i))=0x0;
-	}
-	
-	
-	debug("main\n");
-
-	//init tasks context structs
-	task1_ctx.cr3 = (uint32_t)PGD1_PHY;
-    task1_ctx.esp = (uint32_t*)STACK_USER1_PHY + 0x1000/4-1; //user stack pointer 
-
-	task2_ctx.cr3 = (uint32_t)PGD2_PHY;
-    task2_ctx.esp = (uint32_t*)STACK_USER2_PHY + 0x1000/4-1; // user stack pointer
-
-	prepare_initial_stack((uint32_t*)STACK_USER1_PHY, user1, &task1_ctx, (uint32_t)PGD1_PHY);
-	prepare_initial_stack((uint32_t*)STACK_USER2_PHY, user2, &task2_ctx, (uint32_t)PGD2_PHY);
-	current_task = &task2_ctx;
-
-	set_idtr(idt);
-	set_cr3(KERNEL_PGD);
-	force_interrupts_on();
-	while(1);
+    while(1);
 }
